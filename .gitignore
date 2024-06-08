@@ -30,3 +30,7 @@ yarn-error.log*
 
 # distribution folder
 dist/
+*.jpeg
+output_video.avi
+go.mod
+go.sum
