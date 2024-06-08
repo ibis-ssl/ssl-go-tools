@@ -5,8 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/RoboCup-SSL/ssl-vision-client/pkg/vision"
-	// "github.com/RoboCup-SSL/ssl-go-tools/internal/referee"
-	// "github.com/RoboCup-SSL/ssl-go-tools/internal/vision"
+	"github.com/RoboCup-SSL/ssl-go-tools/pkg/persistence"
 	"google.golang.org/protobuf/proto"
 	"github.com/fogleman/gg"
     "github.com/icza/mjpeg"
@@ -18,9 +17,6 @@ import (
 	"syscall"
 	"strings"
 	"sort"
-	"github.com/RoboCup-SSL/ssl-go-tools/pkg/persistence"
-	// "github.com/pkg/errors"
-	// "time"
 )
 
 var visionAddress = flag.String("visionAddress", "224.5.23.2:10006", "The multicast address of ssl-vision, default: 224.5.23.2:10006")
@@ -54,10 +50,6 @@ func main() {
 			}
 			log.Println(visionMsg)
 
-			// var imageData ImageData
-            // if err := json.Unmarshal(b, &imageData); err != nil {
-            //     log.Fatalf("failed to unmarshal JSON: %v", err)
-            // }
 			frame := visionMsg.Detection
 
 			if *frame.FrameNumber%2 == 1 {
@@ -75,115 +67,7 @@ func main() {
 			}
 
 		}
-		// else if r.MessageType.Id == persistence.MessageSslRefbox2013 {
-		// 	var refereeMsg referee.Referee
-		// 	if err := proto.Unmarshal(r.Message, &refereeMsg); err != nil {
-		// 		log.Println("Could not parse referee message:", err)
-		// 		continue
-		// 	}
-		// 	if *extractReferee {
-		// 		check(writeMessage(f, r.Timestamp, &refereeMsg))
-		// 	}
-		// }
 	}
-
-
-	// receiver := vision.NewReceiver()
-	// receiver.Start(*visionAddress)
-	// print("Vision receiver started")
-
-	// printContinuous(receiver)
-
-}
-
-type Ball struct {
-    Confidence float64 `json:"confidence"`
-    X          float64 `json:"x"`
-    Y          float64 `json:"y"`
-    PixelX     float64 `json:"pixel_x"`
-    PixelY     float64 `json:"pixel_y"`
-}
-
-type Robot struct {
-    Confidence float64 `json:"confidence"`
-    RobotID    int     `json:"robot_id"`
-    X          float64 `json:"x"`
-    Y          float64 `json:"y"`
-    Orientation float64 `json:"orientation"`
-    PixelX     float64 `json:"pixel_x"`
-    PixelY     float64 `json:"pixel_y"`
-}
-
-// ImageData は、JSONで提供される画像情報を表します
-type ImageData struct {
-    FrameNumber int     `json:"frame_number"`
-    TCapture    float64 `json:"t_capture"`
-    TSent       float64 `json:"t_sent"`
-    CameraID    int     `json:"camera_id"`
-    Balls       []Ball  `json:"balls"`
-    RobotsBlue  []Robot `json:"robots_blue"`
-    RobotsYellow []Robot `json:"robots_yellow"`
-}
-
-func printContinuous(receiver *vision.Receiver) {
-	// var odd_frames [4]ImageData
-	// var even_frames [4]ImageData
-	// avi, err := mjpeg.New("output_video.avi", 1280, 720, 30)
-    // if err != nil {
-    //     log.Fatalf("failed to create video: %v", err)
-    // }
-    defer createVideoFromImages("output_video.avi")
-
-	if !*noDetections {
-		receiver.ConsumeDetections = func(frame *vision.SSL_DetectionFrame) {
-			robots := append(frame.RobotsBlue, frame.RobotsYellow...)
-			for _, robot := range robots {
-				// ssl-vision may send a NaN confidence and the json serialization can not deal with it...
-				if math.IsNaN(float64(*robot.Confidence)) {
-					*robot.Confidence = 0
-				}
-			}
-
-			b, err := json.Marshal(frame)
-            if err != nil {
-                log.Fatal(err)
-            }
-
-            fmt.Println(string(b))
-
-			// var imageData ImageData
-            // if err := json.Unmarshal(b, &imageData); err != nil {
-            //     log.Fatalf("failed to unmarshal JSON: %v", err)
-            // }
-
-			// if imageData.FrameNumber%2 == 1 {
-            //     odd_frames[imageData.CameraID] = imageData
-            // } else {
-            //     even_frames[imageData.CameraID] = imageData
-            // }
-
-			// if(imageData.CameraID == 3) {
-			// 	outputFileName := fmt.Sprintf("frame_%d.jpeg", imageData.FrameNumber)
-			// 	if imageData.FrameNumber%2 == 0 {
-			// 		createImage(odd_frames, outputFileName)
-			// 	} else {
-			// 		createImage(even_frames, outputFileName)
-			// 	}
-			// }
-		}
-	}
-	if !*noGeometry {
-		receiver.ConsumeGeometry = func(frame *vision.SSL_GeometryData) {
-			b, err := json.Marshal(frame)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Print(string(b))
-		}
-	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	<-signals
 }
 
 func createImage(frame [4]vision.SSL_DetectionFrame, outputFileName string) {
