@@ -64,7 +64,7 @@ func main() {
 func createImage(frame [4]vision.SSL_DetectionFrame, outputFileName string) {
     const imageWidth = 1280
     const imageHeight = 720
-	const scale = imageWidth / 9000.0
+	const scale = imageWidth / 12000.0
     dc := gg.NewContext(imageWidth, imageHeight)
 
     // 背景色を設定
@@ -102,7 +102,6 @@ func createImage(frame [4]vision.SSL_DetectionFrame, outputFileName string) {
 
     // 画像を保存
 	gg.SaveJPG(outputFileName, dc.Image(), 80)
-    // dc.SaveJPG(outputFileName,80)
     fmt.Println("Image saved as", outputFileName)
 }
 
