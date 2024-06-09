@@ -138,6 +138,10 @@ func createVideoFromImages(outputFileName string){
 					log.Fatalf("failed to add frame to video: %v", err)
 				}
 			}
+			// 画像を削除
+			if err := os.Remove(file.Name()); err!= nil {
+				log.Fatalf("failed to delete image file: %v", err)
+			}
 			index += 1
         }
     }
