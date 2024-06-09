@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/RoboCup-SSL/ssl-vision-client/pkg/vision"
@@ -11,20 +10,12 @@ import (
     "github.com/icza/mjpeg"
 	"io/ioutil"
 	"log"
-	"math"
 	"os"
-	"os/signal"
-	"syscall"
 	"strings"
 	"sort"
 )
 
-var visionAddress = flag.String("visionAddress", "224.5.23.2:10006", "The multicast address of ssl-vision, default: 224.5.23.2:10006")
-var fullScreen = flag.Bool("fullScreen", false, "Print the formatted message to the console, clearing the screen during print")
-var noDetections = flag.Bool("noDetections", false, "Print the detection messages")
-var noGeometry = flag.Bool("noGeometry", false, "Print the geometry messages")
 var logFile = flag.String("file", "/home/hans/Downloads/STOP_AVOID_BALL_test_avoid_ball.log", "The log file to play")
-
 
 func main() {
 	flag.Parse()
@@ -142,7 +133,7 @@ func createVideoFromImages(outputFileName string){
                 log.Fatalf("failed to read image file: %v", err)
             }
             // 画像をビデオに追加
-			if index < len - 1 {
+			if index < len {
 				if err := avi.AddFrame(frame); err != nil {
 					log.Fatalf("failed to add frame to video: %v", err)
 				}
