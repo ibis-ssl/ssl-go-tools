@@ -16,6 +16,7 @@ import (
 )
 
 var logFile = flag.String("file", "/home/hans/Downloads/STOP_AVOID_BALL_test_avoid_ball.log", "The log file to play")
+var output_video = flag.String("output_video", "output_video.avi", "The output video path")
 
 func main() {
 	flag.Parse()
@@ -30,7 +31,7 @@ func main() {
 	var odd_frames [4]vision.SSL_DetectionFrame
 	var even_frames [4]vision.SSL_DetectionFrame
 
-	defer createVideoFromImages("output_video.avi")
+	defer createVideoFromImages(*output_video)
 
 	for r := range channel {
 		if r.MessageType.Id == persistence.MessageSslVision2014 {
