@@ -12,7 +12,10 @@ import (
 	"github.com/RoboCup-SSL/ssl-go-tools/pkg/persistence"
 	"github.com/RoboCup-SSL/ssl-vision-client/pkg/vision"
 	"github.com/fogleman/gg"
+	"github.com/golang/freetype/truetype"
 	"github.com/icza/mjpeg"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/goregular"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -24,23 +27,95 @@ var (
 const (
 	imageWidth          = 1280
 	imageHeight         = 720
-	fieldWidthMM        = 12000.0
-	fieldHeightMM       = 9000.0
 	robotRadiusMM       = 90.0
 	ballRadiusMM        = 21.5
-	expectedCameras     = 4
-	maxBufferedFrames   = 12
+	maxBufferedTicks    = 300
 	ballTrailMaxEntries = 60
 	frameRate           = 30
+	tickInterval        = 1.0 / frameRate
+	labelFontPoints     = 20.0
+)
+
+// フィールド寸法はログのgeometryパケット（SSL_GeometryData）から取得できるため、
+// 以下は取得できなかった場合のフォールバック既定値として扱う。
+// packet.GetGeometry()を受信すると applyGeometry が上書きする。
+var (
+	fieldWidthMM         = 12000.0
+	fieldHeightMM        = 9000.0
+	boundaryWidthMM      = 300.0
+	penaltyDepthMM       = 1000.0
+	penaltyWidthMM       = 2000.0
+	centerCircleRadiusMM = 500.0
 )
 
 var (
-	scale            = math.Min(float64(imageWidth)/fieldWidthMM, float64(imageHeight)/fieldHeightMM)
-	fieldPixelWidth  = fieldWidthMM * scale
-	fieldPixelHeight = fieldHeightMM * scale
-	fieldOffsetX     = (float64(imageWidth) - fieldPixelWidth) / 2
-	fieldOffsetY     = (float64(imageHeight) - fieldPixelHeight) / 2
+	scale            float64
+	fieldPixelWidth  float64
+	fieldPixelHeight float64
+	fieldOffsetX     float64
+	fieldOffsetY     float64
 )
+
+var labelFontFace font.Face
+
+func init() {
+	f, err := truetype.Parse(goregular.TTF)
+	if err != nil {
+		log.Fatalf("failed to parse embedded font: %v", err)
+	}
+	labelFontFace = truetype.NewFace(f, &truetype.Options{Size: labelFontPoints})
+	recomputeLayout()
+}
+
+// recomputeLayout は現在のフィールド寸法・境界幅からキャンバス上のスケールと
+// オフセットを再計算する。既定値の初期化時と、ログからgeometryパケットを
+// 受信して寸法が更新された時の両方で呼ばれる。
+func recomputeLayout() {
+	totalWidthMM := fieldWidthMM + 2*boundaryWidthMM
+	totalHeightMM := fieldHeightMM + 2*boundaryWidthMM
+	scale = math.Min(float64(imageWidth)/totalWidthMM, float64(imageHeight)/totalHeightMM)
+	fieldPixelWidth = fieldWidthMM * scale
+	fieldPixelHeight = fieldHeightMM * scale
+	fieldOffsetX = (float64(imageWidth) - fieldPixelWidth) / 2
+	fieldOffsetY = (float64(imageHeight) - fieldPixelHeight) / 2
+}
+
+// applyGeometry はログに含まれるSSL_GeometryDataからフィールド実寸法を反映する。
+func applyGeometry(geom *vision.SSL_GeometryData) {
+	field := geom.GetField()
+	if field == nil {
+		return
+	}
+	if v := field.GetFieldLength(); v > 0 {
+		fieldWidthMM = float64(v)
+	}
+	if v := field.GetFieldWidth(); v > 0 {
+		fieldHeightMM = float64(v)
+	}
+	if v := field.GetBoundaryWidth(); v > 0 {
+		boundaryWidthMM = float64(v)
+	}
+	if v := field.GetPenaltyAreaDepth(); v > 0 {
+		penaltyDepthMM = float64(v)
+	}
+	if v := field.GetPenaltyAreaWidth(); v > 0 {
+		penaltyWidthMM = float64(v)
+	}
+	if v := field.GetCenterCircleRadius(); v > 0 {
+		centerCircleRadiusMM = float64(v)
+	}
+	recomputeLayout()
+}
+
+// captureTick はt_capture（秒）を出力フレームレートに応じた時刻ティックへ変換する。
+// カメラごとに独立したframe_numberではなく実際のキャプチャ時刻でバンドルすることで、
+// 複数カメラの検出結果を時系列順に正しくマージできる。
+func captureTick(tCapture float64) uint64 {
+	if tCapture <= 0 {
+		return 0
+	}
+	return uint64(tCapture / tickInterval)
+}
 
 type (
 	point struct {
@@ -57,15 +132,14 @@ type (
 	}
 
 	frameBundle struct {
-		number uint64
+		tick   uint64
 		frames map[int]*vision.SSL_DetectionFrame
 	}
 
 	frameCollector struct {
-		expected int
-		maxBuf   int
-		order    []uint64
-		bundles  map[uint64]*frameBundle
+		maxBuf  int
+		order   []uint64
+		bundles map[uint64]*frameBundle
 	}
 
 	colorSpec struct {
@@ -75,8 +149,10 @@ type (
 	}
 
 	renderer struct {
-		writer    mjpeg.AviWriter
-		ballTrail []point
+		writer           mjpeg.AviWriter
+		ballTrail        []point
+		firstCaptureTime float64
+		haveFirstCapture bool
 	}
 )
 
@@ -104,7 +180,7 @@ func main() {
 	}()
 
 	r := newRenderer(video)
-	collector := newFrameCollector(expectedCameras, maxBufferedFrames)
+	collector := newFrameCollector(maxBufferedTicks)
 
 	for record := range channel {
 		if record.MessageType.Id != persistence.MessageSslVision2014 {
@@ -117,8 +193,12 @@ func main() {
 			continue
 		}
 
+		if geom := packet.GetGeometry(); geom != nil {
+			applyGeometry(geom)
+		}
+
 		frame := packet.GetDetection()
-		if frame == nil || frame.CameraId == nil || frame.FrameNumber == nil {
+		if frame == nil || frame.CameraId == nil {
 			continue
 		}
 
@@ -140,57 +220,50 @@ func main() {
 	}
 }
 
-func newFrameCollector(expected, maxBuf int) *frameCollector {
+func newFrameCollector(maxBuf int) *frameCollector {
 	return &frameCollector{
-		expected: expected,
-		maxBuf:   maxBuf,
-		bundles:  make(map[uint64]*frameBundle),
+		maxBuf:  maxBuf,
+		bundles: make(map[uint64]*frameBundle),
 	}
 }
 
+// Add はカメラ1台分の検出フレームを、そのt_captureから求めた時刻ティックの
+// バンドルへ追加する。ティックはログの受信順（≒時系列順）で単調に進むため、
+// 現在のフレームより古いティックはこの時点で全て確定しており、到着順のまま
+// （=時系列順のまま）flushしてよい。maxBufが働くのは、t_captureが壊れている
+// などの異常なログに対する安全弁としてのみ。
 func (fc *frameCollector) Add(frame *vision.SSL_DetectionFrame) []*frameBundle {
-	number := uint64(frame.GetFrameNumber())
-	bundle := fc.bundles[number]
+	tick := captureTick(frame.GetTCapture())
+	bundle := fc.bundles[tick]
 	if bundle == nil {
 		bundle = &frameBundle{
-			number: number,
-			frames: make(map[int]*vision.SSL_DetectionFrame, fc.expected),
+			tick:   tick,
+			frames: make(map[int]*vision.SSL_DetectionFrame),
 		}
-		fc.bundles[number] = bundle
-		fc.order = append(fc.order, number)
+		fc.bundles[tick] = bundle
+		fc.order = append(fc.order, tick)
 	}
 	bundle.frames[int(frame.GetCameraId())] = frame
 
 	var ready []*frameBundle
-	if len(bundle.frames) == fc.expected {
-		ready = append(ready, fc.flush(number))
-	}
-
-	for len(fc.order) > fc.maxBuf {
-		ready = append(ready, fc.flush(fc.order[0]))
+	for len(fc.order) > 0 && (fc.order[0] < tick || len(fc.order) > fc.maxBuf) {
+		ready = append(ready, fc.flushHead())
 	}
 	return ready
 }
 
-func (fc *frameCollector) flush(number uint64) *frameBundle {
-	bundle, ok := fc.bundles[number]
-	if !ok {
-		return nil
-	}
-	delete(fc.bundles, number)
-	for i, n := range fc.order {
-		if n == number {
-			fc.order = append(fc.order[:i], fc.order[i+1:]...)
-			break
-		}
-	}
+func (fc *frameCollector) flushHead() *frameBundle {
+	tick := fc.order[0]
+	fc.order = fc.order[1:]
+	bundle := fc.bundles[tick]
+	delete(fc.bundles, tick)
 	return bundle
 }
 
 func (fc *frameCollector) FlushRemaining() []*frameBundle {
 	var ready []*frameBundle
 	for len(fc.order) > 0 {
-		ready = append(ready, fc.flush(fc.order[0]))
+		ready = append(ready, fc.flushHead())
 	}
 	return ready
 }
@@ -236,7 +309,7 @@ func aggregateDetection(bundle *frameBundle) *aggregatedDetection {
 	}
 
 	det := &aggregatedDetection{
-		FrameNumber: bundle.number,
+		FrameNumber: bundle.tick,
 		CaptureTime: captureSum / math.Max(1, float64(captureCount)),
 		Balls:       ballsFromMap(bestBalls),
 		Blue:        robotsFromMap(bestBlue),
@@ -246,7 +319,9 @@ func aggregateDetection(bundle *frameBundle) *aggregatedDetection {
 }
 
 func ballSpatialKey(ball *vision.SSL_DetectionBall) string {
-	const bucket = 50.0 // millimetres
+	// カメラ間の検出誤差(数十〜100mm程度)を吸収できるよう50mmより広めに取り、
+	// バケット境界をまたいで同一ボールが複数扱いされるのを防ぐ。
+	const bucket = 200.0 // millimetres
 	x := math.Round(float64(ball.GetX())/bucket) * bucket
 	y := math.Round(float64(ball.GetY())/bucket) * bucket
 	return fmt.Sprintf("%.0f:%.0f", x, y)
@@ -281,7 +356,13 @@ func newRenderer(writer mjpeg.AviWriter) *renderer {
 }
 
 func (r *renderer) Render(det *aggregatedDetection) error {
+	if !r.haveFirstCapture {
+		r.firstCaptureTime = det.CaptureTime
+		r.haveFirstCapture = true
+	}
+
 	dc := gg.NewContext(imageWidth, imageHeight)
+	dc.SetFontFace(labelFontFace)
 	drawField(dc)
 
 	r.updateBallTrail(primaryBall(det.Balls))
@@ -341,7 +422,7 @@ func (r *renderer) drawRobots(dc *gg.Context, robots []*vision.SSL_DetectionRobo
 
 		heading := float64(robot.GetOrientation())
 		hx := x + math.Cos(heading)*radius*1.3
-		hy := y - math.Sin(heading)*radius*1.3
+		hy := y + math.Sin(heading)*radius*1.3
 		dc.SetLineWidth(3)
 		dc.DrawLine(x, y, hx, hy)
 		dc.Stroke()
@@ -371,7 +452,13 @@ func (r *renderer) drawBalls(dc *gg.Context, balls []*vision.SSL_DetectionBall) 
 		dc.SetLineWidth(2)
 		dc.Stroke()
 
-		label := fmt.Sprintf("Ball %d  conf %.2f  (%.2f m, %.2f m)", idx+1, ball.GetConfidence(), float64(ball.GetX())/1000, float64(ball.GetY())/1000)
+		if idx != 0 {
+			// 円は候補ごとに描くが、ラベルは最も信頼度が高い1個のみに絞り、
+			// カメラ間の誤差で複数ラベルが重なって見づらくなるのを防ぐ。
+			continue
+		}
+
+		label := fmt.Sprintf("Ball  conf %.2f  (%.2f m, %.2f m)", ball.GetConfidence(), float64(ball.GetX())/1000, float64(ball.GetY())/1000)
 		dc.SetRGBA(0, 0, 0, 0.6)
 		w, h := dc.MeasureString(label)
 		margin := 6.0
@@ -385,17 +472,21 @@ func (r *renderer) drawBalls(dc *gg.Context, balls []*vision.SSL_DetectionBall) 
 func (r *renderer) drawHUD(dc *gg.Context, det *aggregatedDetection) {
 	const (
 		padding   = 14.0
-		lineSpace = 22.0
+		lineSpace = 26.0
 	)
-	width := 290.0
-	height := 120.0
+	width := 320.0
+	height := 150.0
 	dc.SetRGBA(0, 0, 0, 0.55)
 	dc.DrawRoundedRectangle(20, 20, width, height, 10)
 	dc.Fill()
 
+	// det.CaptureTimeはUNIXエポック秒の生値なのでそのまま表示すると桁数が
+	// 大きすぎてパネルからはみ出る。動画内で最初に描画したフレームからの
+	// 経過秒数に変換して表示する。
+	elapsed := det.CaptureTime - r.firstCaptureTime
 	lines := []string{
 		fmt.Sprintf("Frame #%d", det.FrameNumber),
-		fmt.Sprintf("Capture: %.3fs", det.CaptureTime),
+		fmt.Sprintf("Elapsed: %.3fs", elapsed),
 		fmt.Sprintf("Balls: %d", len(det.Balls)),
 		fmt.Sprintf("Blue Robots: %d", len(det.Blue)),
 		fmt.Sprintf("Yellow Robots: %d", len(det.Yellow)),
@@ -431,33 +522,33 @@ func drawField(dc *gg.Context) {
 	dc.DrawRectangle(fieldOffsetX, fieldOffsetY, fieldPixelWidth, fieldPixelHeight)
 	dc.Stroke()
 
+	// ハーフウェーライン: 両チームの陣地を分ける線はフィールド長辺(X)の中央、
+	// つまりX=0を通りY方向いっぱいに伸びる「縦線」が正しい。
 	centerX, centerY := fieldToScreen(0, 0)
-	dc.DrawLine(fieldOffsetX, centerY, fieldOffsetX+fieldPixelWidth, centerY)
+	dc.DrawLine(centerX, fieldOffsetY, centerX, fieldOffsetY+fieldPixelHeight)
 	dc.Stroke()
 
-	dc.DrawCircle(centerX, centerY, 500*scale)
+	dc.DrawCircle(centerX, centerY, centerCircleRadiusMM*scale)
 	dc.Stroke()
 
 	drawPenaltyAreas(dc)
 }
 
 func drawPenaltyAreas(dc *gg.Context) {
-	const (
-		penaltyDepthMM = 1000.0
-		penaltyWidthMM = 2000.0
-		cornerRadius   = 8.0
-	)
+	// penaltyDepthMM/penaltyWidthMMはパッケージ変数(既定値 or geometryパケット由来)。
+	const cornerRadius = 8.0
 
 	leftX := -fieldWidthMM/2 + penaltyDepthMM
 	rightX := fieldWidthMM/2 - penaltyDepthMM
 	top := penaltyWidthMM / 2
 
+	// ペナルティエリアはゴール中心(Y=0)を基準に上下対称、高さpenaltyWidthMM。
 	x, y := fieldToScreen(leftX, top)
-	dc.DrawRoundedRectangle(x-penaltyDepthMM*scale, y-penaltyWidthMM*scale, penaltyDepthMM*scale, penaltyWidthMM*scale*2, cornerRadius)
+	dc.DrawRoundedRectangle(x-penaltyDepthMM*scale, y-penaltyWidthMM*scale, penaltyDepthMM*scale, penaltyWidthMM*scale, cornerRadius)
 	dc.Stroke()
 
 	x, y = fieldToScreen(rightX, top)
-	dc.DrawRoundedRectangle(x, y-penaltyWidthMM*scale, penaltyDepthMM*scale, penaltyWidthMM*scale*2, cornerRadius)
+	dc.DrawRoundedRectangle(x, y-penaltyWidthMM*scale, penaltyDepthMM*scale, penaltyWidthMM*scale, cornerRadius)
 	dc.Stroke()
 }
 
